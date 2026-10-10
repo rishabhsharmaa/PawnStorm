@@ -81,6 +81,13 @@ export interface GameServerHandle {
 
 /** Stale "current game" pointers expire even if a node crashes mid-game. */
 const USER_GAME_TTL_SECONDS = 6 * 60 * 60;
+/**
+ * Unconditional backstop sweep interval. The fast sweep only touches Redis
+ * while a local socket is queued (pay-per-command tiers would otherwise burn
+ * quota polling empty queues); the backstop still pairs seekers orphaned by a
+ * crashed node within minutes.
+ */
+const MATCH_BACKSTOP_MS = 5 * 60 * 1000;
 
 function emitError(socket: GameSocket, code: string, message: string, gameId?: string): void {
   const payload: ErrorPayload = gameId ? { code, message, gameId } : { code, message };
@@ -147,6 +154,54 @@ function gameRouteKey(raw: unknown, socketId: string): string {
   return `invalid:${socketId}:${Date.now()}:${Math.random()}`;
 }
 
+/**
+ * Boot recovery: re-register every live game in Redis so the flag ticker and
+ * rejoin keep working after a restart. Downtime is forgiven — graceful
+ * shutdowns via suspendedAt (same math as loadGame), crashes by resetting
+ * lastMoveAt — because an outage is the server's fault, not the players'.
+ * Runs once at boot, so its handful of SCAN/GET/SET calls costs nothing even
+ * on pay-per-command Redis tiers. Returns the number of resumed games.
+ */
+export async function resumeActiveGames(
+  redis: RedisClient,
+  activeGames: Set<string>,
+  logger: Logger,
+): Promise<number> {
+  let resumed = 0;
+  let cursor = "0";
+  do {
+    const [next, foundKeys] = await redis.scan(cursor, "MATCH", "game:*", "COUNT", 100);
+    // ioredis returns the cursor as a string, ioredis-mock as a number —
+    // normalize so the loop terminates (and never double-counts) on both.
+    cursor = String(next);
+    for (const key of foundKeys) {
+      if (key.endsWith(":result")) continue;
+      const id = key.slice("game:".length);
+      if (!id || id.includes(":")) continue;
+      try {
+        const raw = await redis.get(key);
+        if (!raw) continue;
+        const state = JSON.parse(raw) as GameState;
+        if (!state || state.id !== id || typeof state.fen !== "string") continue;
+        if (state.status !== "playing") continue;
+        if (state.suspendedAt) {
+          const downtime = Date.now() - state.suspendedAt;
+          if (downtime > 0) state.lastMoveAt += downtime;
+        } else {
+          state.lastMoveAt = Date.now();
+        }
+        state.suspendedAt = null;
+        await saveGame(redis, state);
+        activeGames.add(id);
+        resumed += 1;
+      } catch (err) {
+        logger.error({ err, key }, "failed to resume game");
+      }
+    }
+  } while (cursor !== "0");
+  return resumed;
+}
+
 export function createGameServer(deps: ServerDeps): GameServerHandle {
   const nodeId = deps.nodeId ?? randomUUID().slice(0, 8);
   const logger = deps.logger ?? createLogger("info", nodeId);
@@ -156,6 +211,8 @@ export function createGameServer(deps: ServerDeps): GameServerHandle {
   const activeGames = new Set<string>();
   const graceTimers = new Map<string, NodeJS.Timeout>();
   const userSockets = new Map<string, Set<string>>();
+  const queuedSockets = new Set<string>();
+  let lastSweepAt = 0;
   const chainQueueOp = createOpChain();
   const chainGameOp = createOpChain();
   let closing = false;
@@ -346,6 +403,19 @@ export function createGameServer(deps: ServerDeps): GameServerHandle {
     await io.in(userRoom(black.id)).socketsJoin(gameRoom(state.id));
     io.to(userRoom(white.id)).emit("game:start", { ...toSnapshot(state, "w"), rejoined: false });
     io.to(userRoom(black.id)).emit("game:start", { ...toSnapshot(state, "b"), rejoined: false });
+    // Matched players are no longer seeking: clear local queue tracking so the
+    // sweep idle-gate closes (their entries were already claimed from Redis).
+    for (const userId of [white.id, black.id]) {
+      try {
+        const sockets = await io.in(userRoom(userId)).fetchSockets();
+        for (const s of sockets) {
+          s.data.queuedIn = [];
+          queuedSockets.delete(s.id);
+        }
+      } catch (err) {
+        logger.error({ err, userId }, "failed to clear queue tracking after match");
+      }
+    }
     logger.info(
       { gameId: state.id, white: white.id, black: black.id, timeControl },
       "game started",
@@ -380,6 +450,11 @@ export function createGameServer(deps: ServerDeps): GameServerHandle {
     } finally {
       await deps.redis.del(keys.matchLeader);
     }
+  }
+
+  async function runSweep(): Promise<void> {
+    lastSweepAt = Date.now();
+    await sweepMatchmaking();
   }
 
   io.on("connection", (socket: GameSocket) => {
@@ -420,8 +495,9 @@ export function createGameServer(deps: ServerDeps): GameServerHandle {
         const tc = parsed.data.timeControl;
         await enqueue(deps.redis, tc, { userId: user.id, rating: user.rating, joinedAt: Date.now() });
         if (!socket.data.queuedIn.includes(tc)) socket.data.queuedIn.push(tc);
+        queuedSockets.add(socket.id);
         // Try an immediate match so a waiting opponent pairs in ms.
-        sweepMatchmaking().catch((err: unknown) => logger.error({ err }, "sweep failed"));
+        runSweep().catch((err: unknown) => logger.error({ err }, "sweep failed"));
       }).catch((err: unknown) => {
         logger.error({ err, userId: user.id }, "queue:join failed");
         emitError(socket, "INTERNAL", "matchmaking failed, try again");
@@ -437,6 +513,7 @@ export function createGameServer(deps: ServerDeps): GameServerHandle {
         }
         await dequeueFromAll(deps.redis, socket.data.queuedIn, user.id);
         socket.data.queuedIn = [];
+        queuedSockets.delete(socket.id);
       }).catch((err: unknown) => {
         logger.error({ err, userId: user.id }, "queue:leave failed");
       });
@@ -644,6 +721,7 @@ export function createGameServer(deps: ServerDeps): GameServerHandle {
     });
 
     socket.on("disconnect", () => {
+      queuedSockets.delete(socket.id);
       const set = userSockets.get(user.id);
       if (set) {
         set.delete(socket.id);
@@ -723,7 +801,10 @@ export function createGameServer(deps: ServerDeps): GameServerHandle {
   clockTimer.unref?.();
 
   const matchTimer = setInterval(() => {
-    sweepMatchmaking().catch((err: unknown) => logger.error({ err }, "sweep failed"));
+    // Idle gate: an empty queue costs zero Redis commands; the backstop still
+    // runs every MATCH_BACKSTOP_MS for seekers orphaned by a crashed node.
+    if (queuedSockets.size === 0 && Date.now() - lastSweepAt < MATCH_BACKSTOP_MS) return;
+    runSweep().catch((err: unknown) => logger.error({ err }, "sweep failed"));
   }, matchSweepMs);
   matchTimer.unref?.();
 

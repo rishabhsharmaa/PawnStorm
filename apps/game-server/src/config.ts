@@ -9,6 +9,7 @@ const envSchema = z.object({
   MATCH_SWEEP_MS: z.coerce.number().int().positive().default(1_000),
   CLOCK_TICK_MS: z.coerce.number().int().positive().default(250),
   LOG_LEVEL: z.string().default("info"),
+  ENABLE_REDIS_ADAPTER: z.string().default("false").transform((v) => v === "true"),
 });
 
 export type GameServerConfig = z.infer<typeof envSchema>;
@@ -23,5 +24,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GameServerConf
     MATCH_SWEEP_MS: env.MATCH_SWEEP_MS,
     CLOCK_TICK_MS: env.CLOCK_TICK_MS,
     LOG_LEVEL: env.LOG_LEVEL,
+    ENABLE_REDIS_ADAPTER: env.ENABLE_REDIS_ADAPTER,
   });
 }

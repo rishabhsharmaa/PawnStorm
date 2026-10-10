@@ -3,7 +3,7 @@ import { loadConfig } from "./config";
 import { createLogger } from "./logger";
 import { createRedis } from "./redis";
 import { PrismaGameStore } from "./store";
-import { createGameServer } from "./server";
+import { createGameServer, resumeActiveGames } from "./server";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -11,14 +11,15 @@ async function main(): Promise<void> {
   const logger = createLogger(config.LOG_LEVEL, nodeId);
 
   const redis = createRedis(config.REDIS_URL);
-  const pubClient = createRedis(config.REDIS_URL);
-  const subClient = createRedis(config.REDIS_URL);
+  // The Socket.IO Redis adapter is pure overhead on one node (every emit
+  // round-trips Redis); enable it only when running multiple nodes.
+  const pubClient = config.ENABLE_REDIS_ADAPTER ? createRedis(config.REDIS_URL) : undefined;
+  const subClient = config.ENABLE_REDIS_ADAPTER ? createRedis(config.REDIS_URL) : undefined;
   const store = new PrismaGameStore();
 
   const handle = createGameServer({
     redis,
-    pubClient,
-    subClient,
+    ...(pubClient && subClient ? { pubClient, subClient } : {}),
     store,
     jwtSecret: config.GAME_SERVER_JWT_SECRET,
     webOrigin: config.WEB_ORIGIN,
@@ -28,6 +29,9 @@ async function main(): Promise<void> {
     nodeId,
     logger,
   });
+
+  const resumed = await resumeActiveGames(redis, handle.activeGames, logger);
+  if (resumed > 0) logger.info({ resumed }, "resumed live games after restart");
 
   handle.httpServer.listen(config.GAME_SERVER_PORT, () => {
     logger.info(
@@ -45,7 +49,7 @@ async function main(): Promise<void> {
     force.unref?.();
     try {
       await handle.close();
-      await Promise.allSettled([redis.quit(), pubClient.quit(), subClient.quit()]);
+      await Promise.allSettled([redis.quit(), pubClient?.quit(), subClient?.quit()]);
       logger.info("shutdown complete");
       process.exit(0);
     } catch (err) {

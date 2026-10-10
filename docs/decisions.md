@@ -164,3 +164,22 @@ session requirement trivially satisfied; the game-server entrypoint runs
 `prisma migrate deploy` on every boot, and prod Postgres/Redis expose no host
 ports. Managed hosting (Vercel + Railway/Render/Fly) stays documented as the
 alternative.
+
+## D23 — Idle matchmaking sweep gated for pay-per-command Redis
+
+The 1s sweep ran unconditionally: leader lock + 5 queue scans + unlock = 8
+commands/sec ≈ 690k/day idle, exhausting Upstash's 500k/month free quota in
+under a day. The sweep now skips Redis unless a local socket is queued
+(tracking cleared on match/leave/disconnect), plus a 5-min unconditional
+backstop (~1.7k/day) for seekers orphaned by a crashed node. The Socket.IO
+Redis adapter is env-gated (`ENABLE_REDIS_ADAPTER`, default off) since it is
+pure overhead on one node.
+
+## D24 — Boot recovery resumes live games, downtime forgiven
+
+`resumeActiveGames` (called from `index.ts`) SCANs `game:*` on boot, shifts
+suspended games past their downtime (crashes: `lastMoveAt = now`), and
+re-registers them in `activeGames` so the flag ticker and rejoin work after a
+restart — free-tier hosts restart, and an outage is the server's fault, not
+the players'. Disconnect grace timers still do not survive restarts: a player
+mid-grace when the server dies keeps their game and resolves via clocks.

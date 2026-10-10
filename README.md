@@ -65,6 +65,7 @@ Or just press **Continue as guest** — no signup needed.
 | `NEXT_PUBLIC_GAME_SERVER_URL` | web (browser) | Where browsers reach Socket.IO |
 | `GAME_SERVER_PORT` | game-server | Port (default 4000) |
 | `WEB_ORIGIN` | game-server | CORS origin (default `http://localhost:3000`) |
+| `ENABLE_REDIS_ADAPTER` | game-server | Socket.IO Redis adapter for multi-node (default off) |
 
 One root `.env` feeds everything via `dotenv-cli` (see
 [docs/decisions.md](docs/decisions.md)).
@@ -134,9 +135,12 @@ Managed alternative (no VPS):
 - **Game server (Railway / Render / Fly)** — Dockerfile-free: `pnpm install`
   then `pnpm --filter @pawnstorm/game-server build` and
   `node apps/game-server/dist/index.js`. Needs `REDIS_URL`, `DATABASE_URL`,
-  `GAME_SERVER_JWT_SECRET`, `WEB_ORIGIN`, `GAME_SERVER_PORT`. Use managed
-  Postgres + Redis. For >1 replica you **must** enable sticky sessions
-  (see scaling notes) and keep the Redis adapter (default on).
+  `GAME_SERVER_JWT_SECRET`, `WEB_ORIGIN` (`PORT` is accepted as the port too,
+  which is what Render injects). Use managed Postgres + Redis — if the host
+  has no IPv6 egress (e.g. Render), use Supabase's pooler Session-mode (IPv4)
+  connection string, since the direct connection is IPv6-only. For >1 replica
+  you **must** enable sticky sessions (see scaling notes) and set
+  `ENABLE_REDIS_ADAPTER=true` (single-node default needs no adapter).
 - **Stockfish** loads from jsDelivr at runtime; to self-host, drop the
   `stockfish.js` build into `apps/web/public/engine/` and update
   `workers/stockfish.worker.ts`.
