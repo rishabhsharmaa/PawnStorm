@@ -1,0 +1,77 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Result {
+  WHITE_WIN
+  BLACK_WIN
+  DRAW
+}
+
+enum Termination {
+  CHECKMATE
+  RESIGN
+  TIMEOUT
+  STALEMATE
+  AGREEMENT
+  INSUFFICIENT_MATERIAL
+  THREEFOLD
+  FIFTY_MOVE
+  ABANDONED
+}
+
+model User {
+  id            String   @id @default(cuid())
+  username      String   @unique
+  email         String?  @unique
+  passwordHash  String?
+  isGuest       Boolean  @default(false)
+  rating        Int      @default(1200)
+  createdAt     DateTime @default(now())
+  gamesAsWhite  Game[]   @relation("WhiteGames")
+  gamesAsBlack  Game[]   @relation("BlackGames")
+  ratingHistory RatingHistory[]
+
+  @@index([rating(sort: Desc)])
+  @@index([isGuest])
+}
+
+model Game {
+  id               String      @id @default(uuid())
+  whiteId          String
+  blackId          String
+  white            User        @relation("WhiteGames", fields: [whiteId], references: [id])
+  black            User        @relation("BlackGames", fields: [blackId], references: [id])
+  pgn              String      @default("")
+  result           Result
+  termination      Termination
+  timeControl      String
+  whiteRatingBefore Int
+  blackRatingBefore Int
+  whiteRatingAfter  Int
+  blackRatingAfter  Int
+  startedAt        DateTime    @default(now())
+  endedAt          DateTime    @default(now())
+  ratingHistory    RatingHistory[]
+
+  @@index([whiteId, endedAt(sort: Desc)])
+  @@index([blackId, endedAt(sort: Desc)])
+  @@index([endedAt(sort: Desc)])
+}
+
+model RatingHistory {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId      String
+  game        Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  ratingAfter Int
+  createdAt   DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
