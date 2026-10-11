@@ -183,3 +183,19 @@ re-registers them in `activeGames` so the flag ticker and rejoin work after a
 restart — free-tier hosts restart, and an outage is the server's fault, not
 the players'. Disconnect grace timers still do not survive restarts: a player
 mid-grace when the server dies keeps their game and resolves via clocks.
+
+## D25 — Prisma engines for Vercel: rhel target + monorepo plugin
+
+Production on Vercel failed every DB route: only the `native` engine was
+generated, but the Vercel runtime needs `rhel-openssl-3.0.x`, and the pnpm
+virtual-store layout hides the engine from Next's file tracer. Fix:
+`binaryTargets = ["native", "rhel-openssl-3.0.x"]`,
+`@prisma/nextjs-monorepo-workaround-plugin` in the web webpack config
+(server builds only), and `postinstall: prisma generate` in `@pawnstorm/db`
+so a clean install always generates before `next build`. The game server on
+Render needs no change (it builds and runs on the same image, so `native`
+covers it, and its build already runs the db build). `outputFileTracingRoot`/
+`outputFileTracingIncludes` were held back pending evidence — and the
+Vercel-sequence build proved them unnecessary: the plugin copies
+`libquery_engine-rhel-openssl-3.0.x.so.node` into `.next/server/chunks` and
+every server route's `.nft.json` references it.

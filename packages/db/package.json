@@ -7,6 +7,7 @@
   "files": ["dist", "prisma"],
   "scripts": {
     "build": "prisma generate && tsc -p tsconfig.json",
+    "postinstall": "prisma generate",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",

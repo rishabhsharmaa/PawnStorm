@@ -26,5 +26,10 @@ export default tseslint.config(
         __dirname: "readonly",
       },
     },
+    // Config files are legitimately CommonJS (nearest package.json has no
+    // "type" field), e.g. next.config.js requires the Prisma webpack plugin.
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
   },
 );
